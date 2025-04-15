@@ -1,1 +1,5 @@
 /Dataset
+/TransformerFromScratch/Dataset/Image_Classification
+/TransformerFromScratch/Dataset/Text_Classification
+/TransformerFromScratch/Dataset/Text_Generation
+/TransformerFromScratch/generated_samples
