@@ -102,53 +102,48 @@ def train_model(model, train_loader, optimizer, criterion, num_epochs=100, devic
         for data in train_loader:
             data = data.to(device)
             optimizer.zero_grad()
+            
             # Encode node features
             z = model.encode(data.x, data.edge_index)
             
-            # Positive edges
-            pos_edge_index = data.edge_index
-            num_nodes = data.num_nodes
-            num_pos = pos_edge_index.size(1)
-            
-            # Negative edges
-            neg_edge_index = negative_sampling(pos_edge_index, num_nodes, num_neg_samples=num_pos)
-            
-            # Combine edges and labels
-            edge_index = torch.cat([pos_edge_index, neg_edge_index], dim=1)
-            edge_labels = torch.cat([
-                torch.ones(num_pos, device=device),   # Positive
-                torch.zeros(num_pos, device=device)   # Negative
-            ])
-            
             # Predict edges
-            edge_pred = model.decode_edges(z, edge_index)
+            edge_pred = model.decode_edges(z, data.edge_index)
             edge_pred = edge_pred.view(-1)  # Flatten to match labels
             
-            loss = criterion(edge_pred, edge_labels)
+            # Compute loss
+            loss = criterion(edge_pred, data.edge_labels)
             loss.backward()
             optimizer.step()
             total_loss += loss.item()
         avg_loss = total_loss / len(train_loader)
         print(f'Epoch {epoch + 1}/{num_epochs}, Loss: {avg_loss:.4f}')
 
-def classify_edges(model, pyg_graph, threshold=0.5, device='cpu'):
-    """
-    Classifies the edges of a PyG graph using the trained model.
-
-    Args:
-        model: Trained GraphGenerator model.
-        pyg_graph: A PyG Data object.
-        threshold: Probability threshold for classifying an edge as positive.
-        device: Device to run the model on.
-
-    Returns:
-        edge_probs: Tensor of predicted probabilities for each edge.
-        edge_pred_labels: Tensor of predicted labels (0 or 1) for each edge.
-    """
+# --- Testing ---
+def test_model(model, test_loader, criterion, device='cpu'):
     model.eval()
-    pyg_graph = pyg_graph.to(device)
+    total_loss = 0
+    total_correct = 0
+    total_samples = 0
     with torch.no_grad():
-        z = model.encode(pyg_graph.x, pyg_graph.edge_index)
-        edge_probs = model.decode_edges(z, pyg_graph.edge_index).view(-1)
-        edge_pred_labels = (edge_probs >= threshold).long()
-    return edge_probs.cpu(), edge_pred_labels.cpu()
+        for data in test_loader:
+            data = data.to(device)
+            
+            # Encode node features
+            z = model.encode(data.x, data.edge_index)
+            
+            # Predict edges
+            edge_pred = model.decode_edges(z, data.edge_index)
+            edge_pred = edge_pred.view(-1)  # Flatten to match labels
+            
+            # Compute loss
+            loss = criterion(edge_pred, data.edge_labels)
+            total_loss += loss.item()
+            
+            # Compute accuracy
+            predictions = (edge_pred > 0.5).float()  # Threshold at 0.5
+            total_correct += (predictions == data.edge_labels).sum().item()
+            total_samples += data.edge_labels.size(0)
+    
+    avg_loss = total_loss / len(test_loader)
+    accuracy = total_correct / total_samples * 100  # Convert to percentage
+    print(f"Test Loss: {avg_loss:.4f}, Accuracy: {accuracy:.2f}%")

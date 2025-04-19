@@ -22,20 +22,33 @@ def visualize_graph(nx_graph, type_encoding):
     # Reverse mapping: idx -> type name
     idx_to_type = {idx: type_name for type_name, idx in type_encoding.items()}
 
-    # Get node type indices for coloring
-    node_type_indices = [nx_graph.nodes[node]['type'] for node in nx_graph.nodes()]
+    # Ensure all nodes have valid 'type' values
+    default_type = type_encoding.get("unknown", len(type_encoding))
+    if "unknown" not in type_encoding:
+        type_encoding["unknown"] = default_type  # Add 'unknown' to type_encoding if not present
+
+    node_type_indices = [
+        nx_graph.nodes[node].get('type', default_type) if nx_graph.nodes[node]['type'] in type_encoding.values()
+        else default_type
+        for node in nx_graph.nodes()
+    ]
 
     # Create a color map based on type_encoding
     cmap = cm.get_cmap('tab10', len(type_encoding))
-    color_map = {idx: cmap(idx) for idx in idx_to_type.keys()}
-    node_colors = [color_map[type_idx] for type_idx in node_type_indices]
+    color_map = {idx: cmap(idx) for idx in type_encoding.values()}
+    node_colors = [
+        color_map.get(type_idx, (0.5, 0.5, 0.5, 1.0))  # Default to gray for invalid types
+        for type_idx in node_type_indices
+    ]
 
     # Draw the graph
     nx.draw(nx_graph, pos, with_labels=True, node_color=node_colors, node_size=500, font_size=10)
 
     # Add legend
-    handles = [plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[idx], markersize=10, label=type_name)
-               for idx, type_name in idx_to_type.items()]
+    handles = [
+        plt.Line2D([0], [0], marker='o', color='w', markerfacecolor=color_map[idx], markersize=10, label=type_name)
+        for idx, type_name in idx_to_type.items()
+    ]
     plt.legend(handles=handles, title="Room Types")
 
     plt.tight_layout()
@@ -103,22 +116,26 @@ def analyze_graph_dataset(graph_data):
     filtered_graph_data = [g for i, g in enumerate(graph_data) if i not in indices_with_null_nodes]
     return node_type_counts, type_encoding, filtered_graph_data
 
-def build_graph_list(graph_data, type_encoding):
+def build_graph_data(graph_data, type_encoding, test_ratio=0.2, random_state=42):
     """
-    Build a list of NetworkX graphs from the dataset, with all node and edge attributes.
+    Build a list of NetworkX graphs from the dataset, with all node and edge attributes,
+    and split the dataset into training and testing sets.
 
     Args:
         graph_data: List of graph dictionaries containing graph information.
         type_encoding: Dictionary mapping node types to unique indices.
+        test_ratio: Proportion of the dataset to include in the test split (default: 0.2).
+        random_state: Random seed for reproducibility (default: 42).
        
     Returns:
-        graph_list: List of NetworkX graphs.
+        train_graph_list: List of NetworkX graphs for training.
+        test_graph_list: List of NetworkX graphs for testing.
     """
     import networkx as nx
     from collections import defaultdict
+    from sklearn.model_selection import train_test_split
 
     unique_types = list(type_encoding.keys())
-
     graph_list = []
 
     for graph_item in graph_data:
@@ -130,7 +147,7 @@ def build_graph_list(graph_data, type_encoding):
             apartment_area = apartment_width * apartment_length
             temp_counts = defaultdict(int)
 
-            # process the graph information
+            # Process the graph information
             if "Nodes" in graph_info:
                 for node in graph_info["Nodes"]:
                     if "Properties" in node:
@@ -143,7 +160,7 @@ def build_graph_list(graph_data, type_encoding):
             G.graph['area'] = apartment_area
             G.graph['program_vector'] = program_vector
 
-            # process the nodes
+            # Process the nodes
             if "Nodes" in graph_info:
                 for node in graph_info["Nodes"]:
                     if "Properties" in node:
@@ -163,14 +180,14 @@ def build_graph_list(graph_data, type_encoding):
                                 program_vector=program_vector  # 6th feature
                             )
                             
-            # process the edges
+            # Process the edges
             if "Edges" in graph_info:
                 for edge in graph_info["Edges"]:
                     if "Properties" in edge:
                         edge_props = edge["Properties"]
                         source_id = edge_props.get("SourceId")
                         target_id = edge_props.get("TargetId")
-                        edge_length = edge_props.get("Length") # edge feature
+                        edge_length = edge_props.get("Length")  # Edge feature
                         if edge_length is None and source_id is not None and target_id is not None:
                             try:
                                 src = G.nodes[source_id]
@@ -181,24 +198,29 @@ def build_graph_list(graph_data, type_encoding):
                         if source_id is not None and target_id is not None:
                             G.add_edge(source_id, target_id, length=edge_length)
 
-            # add graph to the list
+            # Add graph to the list
             if len(G.nodes) > 0:
                 graph_list.append(G)
-    return graph_list
 
-def convert_nx_to_pyg(nx_graph, type_encodings):
+    # Split the graph list into training and testing sets
+    train_graph_list, test_graph_list = train_test_split(
+        graph_list, test_size=test_ratio, random_state=random_state
+    )
+
+    return train_graph_list, test_graph_list
+
+def convert_nx_to_pyg(nx_graph, type_encodings, num_neg_samples=None):
     """
-    Converts a NetworkX graph into a PyTorch Geometric Data object.
+    Converts a NetworkX graph into a PyTorch Geometric Data object, including negative sampling.
     """
     try:
         unique_types = list(type_encodings.keys())
         num_types = len(type_encodings)
         x = []
         for node, data in nx_graph.nodes(data=True):
-            # Only skip if 'type' is missing
             if 'type' not in data:
                 continue
-            type_idx = data['type']  # Now this is just an int
+            type_idx = data['type']
             node_x = data['x']
             node_y = data['y']
             width = nx_graph.graph['width']
@@ -218,33 +240,54 @@ def convert_nx_to_pyg(nx_graph, type_encodings):
         
         edge_index = []
         edge_attr = []
-        node_idx_map = {node: idx for idx, node in enumerate(nx_graph.nodes())}  # Map node IDs to indices for PyG
+        node_idx_map = {node: idx for idx, node in enumerate(nx_graph.nodes())}
         for source, target, edge_data in nx_graph.edges(data=True):
-            # Only add edges if both nodes exist in the mapping
             if source in node_idx_map and target in node_idx_map:
                 idx_u = node_idx_map[source]
                 idx_v = node_idx_map[target]
-                # Add both directions for undirected graph
                 edge_index.append([idx_u, idx_v])
                 edge_index.append([idx_v, idx_u])
-                length_val = edge_data.get('length', 0.0)  # Use edge length if available, else 0.0
+                length_val = edge_data.get('length', 0.0)
                 edge_attr.append([length_val])
                 edge_attr.append([length_val])
-        if len(edge_index) > 0:
-            edge_index_tensor = torch.tensor(edge_index, dtype=torch.long).t()  # Shape: [2, num_edges]
-            edge_attr_tensor = torch.tensor(edge_attr, dtype=torch.float)       # Shape: [num_edges, 1]
-            data_obj = Data(
-                x=x_tensor,  # Node features
-                edge_index=edge_index_tensor,  # Edge indices
-                edge_attr=edge_attr_tensor,    # Edge attributes (length)
-                area=torch.tensor([nx_graph.graph['area']], dtype=torch.float),  # Graph-level area
-                apartment_width=torch.tensor([nx_graph.graph['width']], dtype=torch.float),  # Graph-level width
-                apartment_length=torch.tensor([nx_graph.graph['length']], dtype=torch.float),  # Graph-level length
-                program_vector=torch.tensor([program_vector], dtype=torch.float)  # Graph-level program vector
-            )
-            return data_obj
+        
+        edge_index_tensor = torch.tensor(edge_index, dtype=torch.long).t() if edge_index else torch.empty((2, 0), dtype=torch.long)
+        edge_attr_tensor = torch.tensor(edge_attr, dtype=torch.float) if edge_attr else torch.empty((0, 1), dtype=torch.float)
+
+        # --- Negative Sampling ---
+        num_nodes = len(nx_graph.nodes)
+        num_pos = edge_index_tensor.size(1) // 2
+        num_neg_samples = num_neg_samples or num_pos
+
+        all_edges = set((i, j) for i in range(num_nodes) for j in range(num_nodes) if i != j)
+        existing_edges = set(tuple(e) for e in edge_index_tensor.t().tolist())
+        candidate_edges = list(all_edges - existing_edges)
+
+        if len(candidate_edges) <= num_neg_samples:
+            neg_edges = candidate_edges
+        else:
+            neg_edges = random.sample(candidate_edges, num_neg_samples)
+
+        neg_edge_index = torch.tensor(neg_edges, dtype=torch.long).t() if neg_edges else torch.empty((2, 0), dtype=torch.long)
+
+        # Combine positive and negative edges
+        combined_edge_index = torch.cat([edge_index_tensor, neg_edge_index], dim=1)
+        edge_labels = torch.cat([
+            torch.ones(num_pos, dtype=torch.float),  # Positive edges
+            torch.zeros(len(neg_edges), dtype=torch.float)  # Negative edges
+        ])
+
+        # Duplicate labels for both directions
+        edge_labels = torch.cat([edge_labels, edge_labels])
+
+        data_obj = Data(
+            x=x_tensor,
+            edge_index=combined_edge_index,
+            edge_attr=edge_attr_tensor,
+            edge_labels=edge_labels
+        )
+        return data_obj
     except Exception as e:
-        # Print error and return None if graph conversion fails
         print(f"Failed to process graph: {str(e)}")
         return None
 
@@ -259,7 +302,7 @@ def convert_nx_to_pyg_2(nx_graph, type_encodings):
         num_types = len(type_encodings)
         x = []
         area = nx_graph.graph['area']
-        program_vector = [nx_graph.graph['program_vector'].get(room_type, 0) for room_type in unique_types]
+        # program_vector = [nx_graph.graph['program_vector'].get(room_type, 0) for room_type in unique_types]
         for node, data in nx_graph.nodes(data=True):
             if 'type' not in data:
                 continue
@@ -267,7 +310,7 @@ def convert_nx_to_pyg_2(nx_graph, type_encodings):
             # One-hot encode the node type
             one_hot = F.one_hot(torch.tensor(type_idx), num_classes=num_types).tolist()
             # Only keep type, area, and program_vector
-            features = one_hot + [area] + program_vector
+            features = one_hot + [area] 
             x.append(features)
         if not x:
             return None
@@ -288,11 +331,53 @@ def convert_nx_to_pyg_2(nx_graph, type_encodings):
                 x=x_tensor,
                 edge_index=edge_index_tensor,
                 area=torch.tensor([area], dtype=torch.float),
-                program_vector=torch.tensor([program_vector], dtype=torch.float)
+                # program_vector=torch.tensor([program_vector], dtype=torch.float)
             )
             return data_obj
     except Exception as e:
         print(f"Failed to process graph: {str(e)}")
+        return None
+    
+def convert_nx_to_pyg_no_edges(nx_graph, type_encodings):
+    """
+    Convert a NetworkX graph to PyTorch Geometric Data format without edges.
+
+    Args:
+        nx_graph: A NetworkX graph object.
+        type_encodings: Dictionary mapping node types to unique indices.
+
+    Returns:
+        A PyTorch Geometric Data object or None if conversion fails.
+    """
+    from torch_geometric.data import Data
+    import torch
+
+    try:
+        # Extract node features
+        node_features = []
+        node_indices = []
+        for node_id, node_data in nx_graph.nodes(data=True):
+            node_indices.append(node_id)
+            node_features.append([
+                node_data.get('x', 0.0),  # X-coordinate
+                node_data.get('y', 0.0),  # Y-coordinate
+                node_data.get('apartment_width', 0.0),  # Apartment width
+                node_data.get('apartment_length', 0.0),  # Apartment length
+                node_data.get('apartment_area', 0.0),  # Apartment area
+            ])
+
+        # Convert node features to a tensor
+        x = torch.tensor(node_features, dtype=torch.float)
+
+        # Create an empty edge_index tensor
+        edge_index = torch.empty((2, 0), dtype=torch.long)
+
+        # Create the PyG Data object
+        data = Data(x=x, edge_index=edge_index)
+
+        return data
+    except Exception as e:
+        print(f"Failed to convert NetworkX graph to PyG format without edges: {e}")
         return None
 
 def get_node_type(features, type_encodings, reverse_encodings):
